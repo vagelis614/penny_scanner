@@ -1,76 +1,97 @@
+# Penny Stock Screener Streamlit App
+
 import streamlit as st
 import pandas as pd
-import numpy as np
 import yfinance as yf
-import requests
-from bs4 import BeautifulSoup
 import ta
+import time
 
-st.set_page_config(page_title="AI Penny Stock Screener", layout="wide")
+st.title("🔥 Penny Stock Screener")
+st.write("Φιλτράρισμα με βάση RSI, MACD, ADX και τιμή κάτω από $5")
 
-st.title("📈 AI Penny Stock Screener (RSI, MACD, ADX, Volume)")
+# --- Step 1: Load tickers ---
+@st.cache_data(show_spinner=False)
+def load_tickers():
+    nasdaq = pd.read_csv(
+        "ftp://ftp.nasdaqtrader.com/SymbolDirectory/nasdaqlisted.txt",
+        sep="|"
+    )
+    nyse = pd.read_csv(
+        "ftp://ftp.nasdaqtrader.com/SymbolDirectory/otherlisted.txt",
+        sep="|"
+    )
+    tickers = pd.concat([
+        nasdaq['Symbol'],
+        nyse['ACT Symbol']
+    ], ignore_index=True).dropna().unique().tolist()
+    return tickers
 
-# ----------- Σκράπινγκ penny stock tickers από Finviz -----------
-@st.cache_data
-def get_penny_stock_tickers(max_price=5.0):
-    url = f"https://finviz.com/screener.ashx?v=111&s=ta_topgainers&f=sh_price_u{max_price}&r=1"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    r = requests.get(url, headers=headers)
-    soup = BeautifulSoup(r.text, 'html.parser')
-    tickers = []
-    for row in soup.select('a.screener-link-primary'):
-        ticker = row.text.strip()
-        if ticker.isalpha():
-            tickers.append(ticker)
-    return list(set(tickers))
+tickers = load_tickers()
+st.success(f"Βρέθηκαν {len(tickers)} συνολικά tickers.")
 
-tickers = get_penny_stock_tickers()
+# --- Step 2: Filter penny stocks under $5 ---
+@st.cache_data(show_spinner=False)
+def filter_penny_stocks(tickers):
+    penny = []
+    for ticker in tickers:
+        try:
+            data = yf.Ticker(ticker).history(period="1d")
+            price = data['Close'][-1]
+            if price < 5 and price > 0.2:
+                penny.append(ticker)
+        except:
+            continue
+    return penny
 
-st.markdown(f"🔍 **Found {len(tickers)} penny stocks under $5:**")
-st.write(tickers)
+sample_size = st.slider("Πόσα tickers να ελέγξω;", 50, 500, 100, step=50)
+if st.button("Ξεκίνα Σκανάρισμα"):
+    penny_stocks = filter_penny_stocks(tickers[:sample_size])
+    st.info(f"Βρέθηκαν {len(penny_stocks)} penny stocks κάτω από $5.")
 
-# ----------- Λογική για screening ----------
-def analyze_ticker(ticker):
-    try:
-        df = yf.download(ticker, period="6mo", interval="1d", progress=False)
-        if df.empty or df['Close'].isnull().all():
-            return None
+    # --- Step 3: Technical Analysis ---
+    results = []
+    progress = st.progress(0)
 
-        df = df.dropna()
-        df['RSI'] = ta.momentum.RSIIndicator(close=df['Close']).rsi()
-        macd = ta.trend.MACD(close=df['Close'])
-        df['MACD'] = macd.macd()
-        df['MACD_signal'] = macd.macd_signal()
-        adx = ta.trend.ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'])
-        df['ADX'] = adx.adx()
-        df['Volume'] = df['Volume']
+    for i, ticker in enumerate(penny_stocks):
+        try:
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="6mo")
+            if len(hist) < 30:
+                continue
 
-        latest = df.iloc[-1]
-        if latest['RSI'] < 30 and latest['MACD'] > latest['MACD_signal'] and latest['ADX'] > 25:
-            return {
-                'Ticker': ticker,
-                'Price': latest['Close'],
-                'RSI': round(latest['RSI'], 2),
-                'MACD': round(latest['MACD'], 2),
-                'MACD Signal': round(latest['MACD_signal'], 2),
-                'ADX': round(latest['ADX'], 2),
-                'Volume': int(latest['Volume']),
-            }
-        return None
-    except Exception as e:
-        return None
+            hist = ta.add_all_ta_features(
+                hist, open="Open", high="High", low="Low",
+                close="Close", volume="Volume"
+            )
 
-st.markdown("📊 **Scanning stocks... This may take a moment.**")
+            latest = hist.iloc[-1]
+            rsi = latest['momentum_rsi']
+            macd = latest['trend_macd']
+            signal = latest['trend_macd_signal']
+            adx = latest['trend_adx']
+            volume = latest['Volume']
 
-results = []
-for ticker in tickers:
-    res = analyze_ticker(ticker)
-    if res:
-        results.append(res)
+            score = 0
+            if rsi < 35: score += 1
+            if macd > signal: score += 1
+            if adx > 20: score += 1
+            if volume > hist['Volume'].mean(): score += 1
 
-if results:
-    df_results = pd.DataFrame(results).sort_values(by="ADX", ascending=False)
-    st.success(f"✅ Found {len(df_results)} strong 'Buy' candidates!")
-    st.dataframe(df_results, use_container_width=True)
-else:
-    st.warning("❌ No strong buy signals found among penny stocks.")
+            if score >= 3:
+                results.append({
+                    'Ticker': ticker,
+                    'Price': hist['Close'].iloc[-1],
+                    'RSI': round(rsi, 2),
+                    'MACD > Signal': macd > signal,
+                    'ADX': round(adx, 2),
+                    'Volume': int(volume),
+                    'Score': score
+                })
+        except:
+            continue
+        progress.progress((i + 1) / len(penny_stocks))
+
+    df_results = pd.DataFrame(results)
+    st.success(f"Βρέθηκαν {len(df_results)} υποψήφιες μετοχές.")
+    st.dataframe(df_results.sort_values(by="Score", ascending=False))
+    st.download_button("💾 Κατέβασε CSV", data=df_results.to_csv(index=False), file_name="penny_stock_results.csv")
