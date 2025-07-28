@@ -4,10 +4,19 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import ta
+import matplotlib.pyplot as plt
 import time
 
 st.title("🔥 Penny Stock Screener")
 st.write("Φιλτράρισμα με βάση RSI, MACD, ADX και τιμή κάτω από $5")
+
+with st.expander("ℹ️ Τι σημαίνει κάθε δείκτης;"):
+    st.markdown("""
+    - **RSI < 35** → Υπερπουλημένη κατάσταση (πιθανή ανοδική αντίδραση)
+    - **MACD > Signal** → Bullish ένδειξη τάσης
+    - **ADX > 20** → Υπάρχει αξιοσημείωτο trend (ισχυρό ή αδύναμο)
+    - **Volume > Μέσος Όγκος** → Αυξημένο ενδιαφέρον
+    """)
 
 # --- Step 1: Load tickers ---
 @st.cache_data(show_spinner=False)
@@ -45,7 +54,7 @@ def filter_penny_stocks(tickers):
             continue
     return penny
 
-sample_size = st.slider("Πόσα tickers να ελέγξω;", 50, 500, 100, step=50)
+sample_size = st.number_input("Πόσα tickers να ελέγξω; (max 11000)", min_value=50, max_value=11000, value=500, step=50)
 if st.button("Ξεκίνα Σκανάρισμα"):
     penny_stocks = filter_penny_stocks(tickers[:sample_size])
     st.info(f"Βρέθηκαν {len(penny_stocks)} penny stocks κάτω από $5.")
@@ -55,6 +64,7 @@ if st.button("Ξεκίνα Σκανάρισμα"):
     else:
         # --- Step 3: Technical Analysis ---
         results = []
+        charts = {}
         progress = st.progress(0)
 
         for i, ticker in enumerate(penny_stocks):
@@ -92,6 +102,14 @@ if st.button("Ξεκίνα Σκανάρισμα"):
                         'Volume': int(volume),
                         'Score': score
                     })
+
+                    # Mini chart
+                    fig, ax = plt.subplots()
+                    hist['Close'].tail(30).plot(ax=ax)
+                    ax.set_title(ticker)
+                    ax.set_ylabel("Price")
+                    charts[ticker] = fig
+
             except Exception as e:
                 print(f"Error analyzing {ticker}: {e}")
                 continue
@@ -102,5 +120,22 @@ if st.button("Ξεκίνα Σκανάρισμα"):
             st.warning("❌ No strong buy signals found among penny stocks.")
         else:
             st.success(f"Βρέθηκαν {len(df_results)} υποψήφιες μετοχές.")
-            st.dataframe(df_results.sort_values(by="Score", ascending=False))
+
+            def color_score(val):
+                if val >= 4:
+                    return 'background-color: green; color: white'
+                elif val == 3:
+                    return 'background-color: orange; color: black'
+                else:
+                    return ''
+
+            styled_df = df_results.sort_values(by="Score", ascending=False).style.applymap(color_score, subset=['Score'])
+            st.dataframe(styled_df, use_container_width=True)
+
+            # Show mini charts
+            st.subheader("📈 Mini Charts")
+            for ticker in df_results.sort_values(by="Score", ascending=False)['Ticker']:
+                if ticker in charts:
+                    st.pyplot(charts[ticker])
+
             st.download_button("💾 Κατέβασε CSV", data=df_results.to_csv(index=False), file_name="penny_stock_results.csv")
