@@ -4,19 +4,23 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import ta
-import matplotlib.pyplot as plt
-import time
+from datetime import datetime, timedelta
+import requests
 
 st.title("🔥 Penny Stock Screener")
-st.write("Φιλτράρισμα με βάση RSI, MACD, ADX και τιμή κάτω από $5")
+st.write("Φιλτράρισμα με βάση RSI, MACD, ADX, Volume και Εκρηκτικές Ειδήσεις")
 
 with st.expander("ℹ️ Τι σημαίνει κάθε δείκτης;"):
     st.markdown("""
     - **RSI < 35** → Υπερπουλημένη κατάσταση (πιθανή ανοδική αντίδραση)
     - **MACD > Signal** → Bullish ένδειξη τάσης
-    - **ADX > 20** → Υπάρχει αξιοσημείωτο trend (ισχυρό ή αδύναμο)
+    - **ADX > 20** → Υπάρχει αξιοσημείωτο trend
     - **Volume > Μέσος Όγκος** → Αυξημένο ενδιαφέρον
+    - **Earnings Soon** → Επερχόμενα οικονομικά αποτελέσματα (πιθανή μεταβλητότητα)
+    - **News Catalyst** → Πρόσφατες ειδήσεις σχετικές με FDA, trials, approvals κ.λπ.
     """)
+
+API_KEY = "pub_42f28d75ab6a4124a6c74bc9e2099f77"
 
 # --- Step 1: Load tickers ---
 @st.cache_data(show_spinner=False)
@@ -35,10 +39,6 @@ def load_tickers():
     ], ignore_index=True).dropna().unique().tolist()
     return tickers
 
-tickers = load_tickers()
-st.success(f"Βρέθηκαν {len(tickers)} συνολικά tickers.")
-
-# --- Step 2: Filter penny stocks under $5 ---
 @st.cache_data(show_spinner=False)
 def filter_penny_stocks(tickers):
     penny = []
@@ -49,23 +49,38 @@ def filter_penny_stocks(tickers):
                 price = data['Close'][-1]
                 if 0.01 < price < 5:
                     penny.append(ticker)
-        except Exception as e:
-            print(f"Error for {ticker}: {e}")
+        except:
             continue
     return penny
 
+def has_biotech_news(ticker, api_key):
+    keywords = ['FDA', 'phase 2', 'clinical trial', 'approval', 'data readout', 'pdufa']
+    url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={ticker}&language=en"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            for article in data.get('results', []):
+                text = (article.get('title', '') + article.get('description', '')).lower()
+                if any(k.lower() in text for k in keywords):
+                    return True, article['title']
+    except:
+        pass
+    return False, None
+
 sample_size = st.number_input("Πόσα tickers να ελέγξω; (max 11000)", min_value=50, max_value=11000, value=500, step=50)
 if st.button("Ξεκίνα Σκανάρισμα"):
+    tickers = load_tickers()
     penny_stocks = filter_penny_stocks(tickers[:sample_size])
     st.info(f"Βρέθηκαν {len(penny_stocks)} penny stocks κάτω από $5.")
 
     if not penny_stocks:
         st.error("❌ Δεν βρέθηκαν penny stocks κάτω από $5.")
     else:
-        # --- Step 3: Technical Analysis ---
         results = []
-        charts = {}
         progress = st.progress(0)
+        today = datetime.today()
+        seven_days = today + timedelta(days=7)
 
         for i, ticker in enumerate(penny_stocks):
             try:
@@ -74,17 +89,26 @@ if st.button("Ξεκίνα Σκανάρισμα"):
                 if len(hist) < 30:
                     continue
 
-                hist = ta.add_all_ta_features(
-                    hist, open="Open", high="High", low="Low",
-                    close="Close", volume="Volume"
-                )
-
+                hist = ta.add_all_ta_features(hist, open="Open", high="High", low="Low", close="Close", volume="Volume")
                 latest = hist.iloc[-1]
                 rsi = latest['momentum_rsi']
                 macd = latest['trend_macd']
                 signal = latest['trend_macd_signal']
                 adx = latest['trend_adx']
                 volume = latest['Volume']
+
+                earnings_soon = False
+                earnings_date = None
+                try:
+                    cal = stock.calendar
+                    if not cal.empty:
+                        earnings_date = cal.loc['Earnings Date'][0]
+                        if isinstance(earnings_date, pd.Timestamp) and today <= earnings_date <= seven_days:
+                            earnings_soon = True
+                except:
+                    pass
+
+                news_catalyst, news_title = has_biotech_news(ticker, API_KEY)
 
                 score = 0
                 if rsi < 35: score += 1
@@ -100,18 +124,13 @@ if st.button("Ξεκίνα Σκανάρισμα"):
                         'MACD > Signal': macd > signal,
                         'ADX': round(adx, 2),
                         'Volume': int(volume),
-                        'Score': score
+                        'Score': score,
+                        'Earnings Soon': earnings_soon,
+                        'Earnings Date': earnings_date.date() if isinstance(earnings_date, pd.Timestamp) else None,
+                        'News Catalyst': news_catalyst,
+                        'Headline': news_title if news_catalyst else ''
                     })
-
-                    # Mini chart
-                    fig, ax = plt.subplots()
-                    hist['Close'].tail(30).plot(ax=ax)
-                    ax.set_title(ticker)
-                    ax.set_ylabel("Price")
-                    charts[ticker] = fig
-
-            except Exception as e:
-                print(f"Error analyzing {ticker}: {e}")
+            except:
                 continue
             progress.progress((i + 1) / len(penny_stocks))
 
@@ -121,21 +140,19 @@ if st.button("Ξεκίνα Σκανάρισμα"):
         else:
             st.success(f"Βρέθηκαν {len(df_results)} υποψήφιες μετοχές.")
 
-            def color_score(val):
-                if val >= 4:
-                    return 'background-color: green; color: white'
-                elif val == 3:
-                    return 'background-color: orange; color: black'
+            def highlight_rows(row):
+                if row['News Catalyst']:
+                    return ['background-color: red; color: white'] * len(row)
+                elif row['Earnings Soon']:
+                    return ['background-color: #0077cc; color: white'] * len(row)
+                elif row['Score'] >= 4:
+                    return ['background-color: green; color: white'] * len(row)
+                elif row['Score'] == 3:
+                    return ['background-color: orange; color: black'] * len(row)
                 else:
-                    return ''
+                    return [''] * len(row)
 
-            styled_df = df_results.sort_values(by="Score", ascending=False).style.applymap(color_score, subset=['Score'])
+            styled_df = df_results.sort_values(by="Score", ascending=False).style.apply(highlight_rows, axis=1)
             st.dataframe(styled_df, use_container_width=True)
-
-            # Show mini charts
-            st.subheader("📈 Mini Charts")
-            for ticker in df_results.sort_values(by="Score", ascending=False)['Ticker']:
-                if ticker in charts:
-                    st.pyplot(charts[ticker])
 
             st.download_button("💾 Κατέβασε CSV", data=df_results.to_csv(index=False), file_name="penny_stock_results.csv")
